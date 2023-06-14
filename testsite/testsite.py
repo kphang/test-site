@@ -1,6 +1,6 @@
 import uvicorn
 
-from fastapi import FastAPI, Request, Depends
+from fastapi import FastAPI, Request
 from pydantic import BaseModel
 
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -13,17 +13,12 @@ from datetime import datetime
 from typing import Optional
 from enum import StrEnum, auto
 import random
-from anyio import Semaphore, create_task_group, sleep
+from anyio import Semaphore, sleep
 
 
 
 testsite = FastAPI(title="Test Site")
 
-limiter = Limiter(key_func=get_remote_address)
-testsite.state.limiter = limiter
-testsite.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-semaphore = Semaphore(5)#limitparams.maxconcur)
-# experiment with semaphore vs uvicorn's limit-concurrency setting
 
 class Period(StrEnum):
     second = auto()
@@ -40,13 +35,36 @@ class LimitParams(BaseModel):
     quotaperiod: Optional[Period] = "day"
     maxconcur: Optional[int] = 10
     throttleatpct: Optional[float] = None
-    maxranddelay: Optional[float] = 0.0
+    maxranddelay: Optional[float] = None
               
-# TODO: validation of limit combinations (rate and period need to be both present, maxconcur > 0        
+# TODO: validation of limit combinations (rate and period need to be both present, maxconcur > 0           
 
+###
 
+parser = argparse.ArgumentParser()
 
-async def default_response(request: Request, semaphore: Semaphore, limitparams: Optional[LimitParams] = None, ) -> dict :
+parser.add_argument("-r", "--rate", type=int, default=10,help="Set allowed rate (int)")
+parser.add_argument("-rp", "--rateperiod", type=str, default="second", choices=["second","minute","hour","day","month","year"], help="Set period for allowed rate [second,minute,hour,day,month,year]")
+parser.add_argument("-q", "--quota", type=int, default=10000, help="Set allowed quota (int)")
+parser.add_argument("-qp", "--quotaperiod", type=str, default="day", choices=["second","minute","hour","day","month","year"], help="Set period for quota [second,minute,hour,day,month,year]")
+parser.add_argument("-c", "--maxconcur", type=int, default=10, help="Set max concurrent requests per user (int)")
+parser.add_argument("-tp", "--throttleatpct", type=float, default=None, help="Set percentage of quota at which point responses will be throttled")
+parser.add_argument("-d", "--maxranddelay", type=float, default=None, help="Set max random delay in seconds (float)")
+
+args = parser.parse_args()
+limitparams = LimitParams(**dict(args._get_kwargs()))   
+
+###
+
+limiter = Limiter(key_func=get_remote_address)
+testsite.state.limiter = limiter
+testsite.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+semaphore = Semaphore(limitparams.maxconcur)
+# TODO: experiment with semaphore vs uvicorn's limit-concurrency setting
+
+###
+
+async def default_response(request: Request) -> dict :
     """Creates a standard diagnostic response that includes information about the endpoint hit and the data sent.
     Also includes timestamps indicating the point at which the request was received and filled. This can be used
     to compare against the actual request and response time on the client side.
@@ -68,13 +86,16 @@ async def default_response(request: Request, semaphore: Semaphore, limitparams: 
             "clientAddress": request.client,
             "requestBody": await request.body(),       
         },
-        "config": {
-            "LimitParams": {} if limitparams is None else limitparams.dict(),
-            "randdelay": None if limitparams is None else request.state.randdelay
+        "config": {            
         },        
         "receivedAt": request.state.receivedAt,
         "fulfilledAt": datetime.now()
     }            
+    if request["path"]=="/limited":
+        response["config"]["LimitParams"] = limitparams.dict()        
+        if limitparams.maxranddelay is not None:
+            response["config"]["randdelay"] = request.state.randdelay        
+    
     return response
 
         
@@ -95,7 +116,7 @@ async def index(request: Request):
 @testsite.get("/limited")
 @testsite.post("/limited")
 @limiter.limit("{limitparams.rate}/{limitparams.rateperiod},{limitparams.quota}/{limitparams.quotaperiod}")
-async def limited_endpoint(request: Request, limitparams: LimitParams = Depends()):    
+async def limited_endpoint(request: Request):    
     """Endpoint to test BADGER's ability to handle different API limits.
     
     Supports following limits:
@@ -141,31 +162,14 @@ async def limited_endpoint(request: Request, limitparams: LimitParams = Depends(
         else:
             request.state.randdelay = 0
         
-        # TODO: throttle
+        # TODO: implement throttle
         
-        response = await default_response(request, limitparams)    
+        response = await default_response(request)    
     
     return response
 
 
 
-parser = argparse.ArgumentParser()
-
-parser.add_argument("-r", "--rate", type=int, default=10,help="Set allowed rate (int)")
-parser.add_argument("-rp", "--rateperiod", type=str, default="second", choices=["second","minute","hour","day","month","year"], help="Set period for allowed rate [second,minute,hour,day,month,year]")
-parser.add_argument("-q", "--quota", type=int, default=10000, help="Set allowed quota (int)")
-parser.add_argument("-qp", "--quotaperiod", type=str, default="day", choices=["second","minute","hour","day","month","year"], help="Set period for quota [second,minute,hour,day,month,year]")
-parser.add_argument("-c", "--maxconcur", type=int, default=10, help="Set max concurrent requests per user (int)")
-parser.add_argument("-tp", "--throttleatpct", type=float, default=None, help="Set percentage of quota at which point responses will be throttled")
-parser.add_argument("-d", "--maxranddelay", type=float, default=None, help="Set max random delay in seconds (float)")
-
-args = parser.parse_args()
-
 if __name__ == "__main__":
-    # TODO: take arguments on run to set configuration - if none provided use default
-    limitparams = LimitParams(**dict(args._get_kwargs()))
-    print(limitparams)
-    #print(dict(args._get_kwargs()))
-    #parser.add_argument()
-    
-    #uvicorn.run("testsite:testsite", port=9000, reload=True)    
+        
+    uvicorn.run("testsite:testsite", port=9000, reload=True)    
