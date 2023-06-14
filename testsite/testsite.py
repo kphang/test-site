@@ -7,19 +7,23 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
+import argparse
+import logging
 from datetime import datetime
 from typing import Optional
 from enum import StrEnum, auto
-import logging
 import random
 from anyio import Semaphore, create_task_group, sleep
+
+
 
 testsite = FastAPI(title="Test Site")
 
 limiter = Limiter(key_func=get_remote_address)
 testsite.state.limiter = limiter
 testsite.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-
+semaphore = Semaphore(5)#limitparams.maxconcur)
+# experiment with semaphore vs uvicorn's limit-concurrency setting
 
 class Period(StrEnum):
     second = auto()
@@ -125,10 +129,7 @@ async def limited_endpoint(request: Request, limitparams: LimitParams = Depends(
     Returns:
         dict: Standard diagnostic response
     """
-    semaphore = Semaphore(limitparams.maxconcur) # TODO: I don't think this works - I think every individual get spawns semaphores
-    # TODO: I think I need to have something set the config for the endpoint and then hit the endpoint separate from the configuration
-    # Option 1: arguments on startup
-    # Option 2: separate configuration endpoint
+     
     async with semaphore:
 
         request.state.receivedAt = datetime.now()                
@@ -140,12 +141,31 @@ async def limited_endpoint(request: Request, limitparams: LimitParams = Depends(
         else:
             request.state.randdelay = 0
         
-        # TODO: maxconcur, throttle
+        # TODO: throttle
         
         response = await default_response(request, limitparams)    
     
     return response
 
 
+
+parser = argparse.ArgumentParser()
+
+parser.add_argument("-r", "--rate", type=int, default=10,help="Set allowed rate (int)")
+parser.add_argument("-rp", "--rateperiod", type=str, default="second", choices=["second","minute","hour","day","month","year"], help="Set period for allowed rate [second,minute,hour,day,month,year]")
+parser.add_argument("-q", "--quota", type=int, default=10000, help="Set allowed quota (int)")
+parser.add_argument("-qp", "--quotaperiod", type=str, default="day", choices=["second","minute","hour","day","month","year"], help="Set period for quota [second,minute,hour,day,month,year]")
+parser.add_argument("-c", "--maxconcur", type=int, default=10, help="Set max concurrent requests per user (int)")
+parser.add_argument("-tp", "--throttleatpct", type=float, default=None, help="Set percentage of quota at which point responses will be throttled")
+parser.add_argument("-d", "--maxranddelay", type=float, default=None, help="Set max random delay in seconds (float)")
+
+args = parser.parse_args()
+
 if __name__ == "__main__":
-    uvicorn.run("testsite:testsite", reload=True)
+    # TODO: take arguments on run to set configuration - if none provided use default
+    limitparams = LimitParams(**dict(args._get_kwargs()))
+    print(limitparams)
+    #print(dict(args._get_kwargs()))
+    #parser.add_argument()
+    
+    #uvicorn.run("testsite:testsite", port=9000, reload=True)    
