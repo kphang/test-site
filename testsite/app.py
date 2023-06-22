@@ -1,11 +1,13 @@
 import uvicorn
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from pydantic import BaseModel
 
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
+from slowapi.wrappers import Limit
+from limits import parse
 
 import argparse
 import logging
@@ -16,9 +18,10 @@ import random
 from anyio import Semaphore, sleep
 
 
-
 testsite = FastAPI(title="Test Site")
-logging.basicConfig(level=logging.INFO, format="[%(levelname)s]: %(asctime)s - %(message)s")
+logging.basicConfig(
+    level=logging.INFO, format="[%(levelname)s]: %(asctime)s - %(message)s"
+)
 
 
 class Period(StrEnum):
@@ -28,46 +31,87 @@ class Period(StrEnum):
     day = auto()
     month = auto()
     year = auto()
-    
-class LimitConfig(BaseModel):    
-    rate: Optional[int] = 10 
+
+
+class LimitConfig(BaseModel):
+    rate: Optional[int] = 10
     rateperiod: Optional[Period] = "second"
     quota: Optional[int] = 10000
     quotaperiod: Optional[Period] = "day"
     maxconcur: Optional[int] = 10
-    throttleatpct: Optional[float] = None
+    throttle: bool = False
     maxranddelay: Optional[float] = None
-              
+
+
 # TODO: validation of limit combinations (rate and period need to be both present, maxconcur > 0
-# TODO: validation of maxranddelay and throttleatpct to be >0          
+# TODO: validation of maxranddelay > 0
+# TODO: validation of throttle requires at least one of the rate/quota and periods
 
 ###
 
 parser = argparse.ArgumentParser()
 
-parser.add_argument("-r", "--rate", type=int, default=10,help="Set allowed rate (int)")
-parser.add_argument("-rp", "--rateperiod", type=str, default="second", choices=["second","minute","hour","day","month","year"], help="Set period for allowed rate [second,minute,hour,day,month,year]")
-parser.add_argument("-q", "--quota", type=int, default=10000, help="Set allowed quota (int)")
-parser.add_argument("-qp", "--quotaperiod", type=str, default="day", choices=["second","minute","hour","day","month","year"], help="Set period for quota [second,minute,hour,day,month,year]")
-parser.add_argument("-c", "--maxconcur", type=int, default=10, help="Set max concurrent requests per user (int)")
-parser.add_argument("-tp", "--throttleatpct", type=float, default=None, help="Set percentage of quota at which point responses will be throttled")
-parser.add_argument("-d", "--maxranddelay", type=float, default=None, help="Set max random delay in seconds (float)")
+parser.add_argument("-r", "--rate", type=int, default=10, help="Set allowed rate (int)")
+parser.add_argument(
+    "-rp",
+    "--rateperiod",
+    type=str,
+    default="second",
+    choices=["second", "minute", "hour", "day", "month", "year"],
+    help="Set period for allowed rate [second,minute,hour,day,month,year]",
+)
+parser.add_argument(
+    "-q", "--quota", type=int, default=10000, help="Set allowed quota (int)"
+)
+parser.add_argument(
+    "-qp",
+    "--quotaperiod",
+    type=str,
+    default="day",
+    choices=["second", "minute", "hour", "day", "month", "year"],
+    help="Set period for quota [second,minute,hour,day,month,year]",
+)
+parser.add_argument(
+    "-c",
+    "--maxconcur",
+    type=int,
+    default=10,
+    help="Set max concurrent requests per user (int)",
+)
+parser.add_argument(
+    "-t",
+    "--throttle",
+    type=float,
+    default=False,
+    help="If true, doubles response time once rate/quota exceeded",
+)
+parser.add_argument(
+    "-d",
+    "--maxranddelay",
+    type=float,
+    default=None,
+    help="Set max random delay in seconds (float)",
+)
 
 args = parser.parse_args()
-limitconfig = LimitConfig(**dict(args._get_kwargs()))   
+limitconfig = LimitConfig(**dict(args._get_kwargs()))
 
 ###
 
-limiter = Limiter(key_func=get_remote_address)
+limiter = Limiter(
+    key_func=get_remote_address, headers_enabled=True, strategy="moving-window"
+)
+# FIXME: rate strategy should be moving window but quota should be fixed
 testsite.state.limiter = limiter
 testsite.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 semaphore = Semaphore(limitconfig.maxconcur)
-sems_acq = 0
+
 # TODO: experiment with semaphore vs uvicorn's limit-concurrency setting
 
 ###
 
-async def default_response(request: Request) -> dict :
+
+async def default_response(request: Request) -> dict:
     """Creates a standard diagnostic response that includes information about the endpoint hit and the data sent.
     Also includes timestamps indicating the point at which the request was received and filled. This can be used
     to compare against the actual request and response time on the client side.
@@ -80,48 +124,48 @@ async def default_response(request: Request) -> dict :
     Returns:
         dict: Standard diagnostic response
     """
-    # because body is an awaitable cannot be a pydantic model without more complex solutions    
-    response = {        
+    # because body is an awaitable cannot be a pydantic model without more complex solutions
+    response = {
         "request": {
             "path": request["path"],
             "headers": request.headers,
             "queryParams": request.query_params,
             "clientAddress": request.client,
-            "requestBody": await request.body(),       
+            "requestBody": await request.body(),
         },
-        "config": {            
-        },        
+        "config": {},
         "receivedAt": request.state.receivedAt,
-        "fulfilledAt": datetime.now()
-    }            
-    if request["path"]=="/limited":
-        response["config"]["LimitConfig"] = limitconfig.dict()        
+        "fulfilledAt": datetime.now(),
+    }
+    if request["path"] == "/limited":
+        response["config"]["LimitConfig"] = limitconfig.dict()
         if limitconfig.maxranddelay is not None:
-            response["config"]["randdelay"] = request.state.randdelay        
-    
+            response["config"]["randdelay"] = request.state.randdelay
+
     return response
 
-        
-    
+
 @testsite.get("/")
 @testsite.post("/")
-async def index(request: Request):    
+async def index(request: Request):
     """Standard endpoint for non-limited testing.
 
     Returns:
         dict: Standard diagnostic response
     """
     request.state.receivedAt = datetime.now()
-    response = await default_response(request)    
+    response = await default_response(request)
     return response
 
 
 @testsite.get("/limited")
 @testsite.post("/limited")
-@limiter.limit("{limitconfig.rate}/{limitconfig.rateperiod},{limitconfig.quota}/{limitconfig.quotaperiod}")
-async def limited_endpoint(request: Request):    
+@limiter.limit(
+    f"{limitconfig.rate}/{limitconfig.rateperiod},{limitconfig.quota}/{limitconfig.quotaperiod}"
+)  # FIXME: needs to handle Nones
+async def limited_endpoint(request: Request, response: Response):
     """Endpoint to test BADGER's ability to handle different API limits.
-    
+
     Supports following limits:
         - # of requests per defined period
         - max # of concurrent requests
@@ -134,7 +178,7 @@ async def limited_endpoint(request: Request):
 
     Returns:
         dict: Standard diagnostic response
-    """    
+    """
     """Endpoint to test BADGER's ability to handle different API limits.
     
     Supports following limits:
@@ -153,31 +197,44 @@ async def limited_endpoint(request: Request):
     Returns:
         dict: Standard diagnostic response
     """
-    
-    async with semaphore:                
+
+    async with semaphore:
         logging.info(f"{semaphore._value} semaphore available")
-        
-        request.state.receivedAt = datetime.now()                
-        
+
         if limitconfig.maxranddelay is not None and limitconfig.maxranddelay > 0:
-            random.seed()        
-            request.state.randdelay = random.uniform(0,limitconfig.maxranddelay)
-            logging.info(request.state.randdelay)
+            random.seed()
+            request.state.randdelay = random.uniform(0, limitconfig.maxranddelay)
+            logging.info(f"{request.state.randdelay}s of random delay")
             await sleep(request.state.randdelay)
         else:
             request.state.randdelay = 0
-        
+
         # TODO: implement throttle
-        
-        response = await default_response(request)    
-        
-        
-        #logging.info(datetime.now() + "{sems_acq} semaphore acquired")
-    
+
+        response = await default_response(request)
+
+    logging.info(f"{semaphore._value} semaphore available")
+
     return response
 
 
 
-if __name__ == "__main__":
+@testsite.middleware("http")
+async def middleware(request: Request, call_next):
+    request.state.receivedAt = datetime.now()
+    # TODO: add removing 429 on exceeding rate/quota if throttle is true
+    
+    response = await call_next(request)    
+    
+    # show remaining calls
+        # response.headers['x-ratelimit-remaining'] fails to provide data for multiple limits
+    for i in limiter._storage.events:            
+        logging.info(f"{i} remaining in period: {int(i.split('/')[-3])-len(limiter._storage.events[i])})")
+    
+    
         
-    uvicorn.run("app:testsite", port=9000, reload=True)    
+    return response
+    
+
+if __name__ == "__main__":
+    uvicorn.run("app:testsite", port=9000, reload=True)
