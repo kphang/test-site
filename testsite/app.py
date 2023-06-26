@@ -6,11 +6,10 @@ from pydantic import BaseModel
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
-from slowapi.wrappers import Limit
-from limits import parse
 
 import argparse
 import logging
+import sys
 from datetime import datetime
 from typing import Optional
 from enum import StrEnum, auto
@@ -81,7 +80,7 @@ parser.add_argument(
 parser.add_argument(
     "-t",
     "--throttle",
-    type=float,
+    type=bool,
     default=False,
     help="If true, doubles response time once rate/quota exceeded",
 )
@@ -106,9 +105,10 @@ testsite.state.limiter = limiter
 testsite.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 semaphore = Semaphore(limitconfig.maxconcur)
 
-# TODO: experiment with semaphore vs uvicorn's limit-concurrency setting
+idlist = ["127.0.0.1", "/limited"]
 
-###
+
+### FUNCTIONS
 
 
 async def default_response(request: Request) -> dict:
@@ -145,6 +145,49 @@ async def default_response(request: Request) -> dict:
     return response
 
 
+def throttle_excess() -> bool:
+    
+    cur_limit = sys._getframe(1).f_locals["self"].limit                
+    l_results = {}
+    
+    for l in limiter._route_limits["app.limited_endpoint"]:        
+        if limitconfig.throttle and not limiter.limiter.test(l.limit,*idlist):
+            l_results[l.limit]= True
+        else:
+            l_results[l.limit]= False    
+
+    if any(l_results.values()):        
+        for k,v in l_results.items():
+            if k==cur_limit and not v:
+                limiter.limiter.hit(k,*idlist) # FIXME: this ends up running twice!        
+        return True        
+    else:
+        return False
+        
+        
+### ENDPOINTS
+
+@testsite.middleware("http")
+async def middleware(request: Request, call_next):
+    
+    request.state.receivedAt = datetime.now()
+        
+    if limitconfig.throttle:
+        request.state.throttled = False
+        
+    for l in limiter._route_limits["app.limited_endpoint"]:
+        logging.info(f"{(l.limit, *idlist)} available: {limiter.limiter.get_window_stats(l.limit, *idlist)[1]}")
+        if limitconfig.throttle and not limiter.limiter.test(l.limit,*idlist):
+            request.state.throttled = True                
+                                
+    response = await call_next(request)    
+        
+    if limitconfig.throttle and request.state.throttled:
+        logging.info("Request throttled")        
+        await sleep((datetime.now()-request.state.receivedAt).total_seconds())        
+        
+    return response
+
 @testsite.get("/")
 @testsite.post("/")
 async def index(request: Request):
@@ -152,50 +195,34 @@ async def index(request: Request):
 
     Returns:
         dict: Standard diagnostic response
-    """
-    request.state.receivedAt = datetime.now()
+    """    
     response = await default_response(request)
+    
     return response
 
 
 @testsite.get("/limited")
 @testsite.post("/limited")
 @limiter.limit(
-    f"{limitconfig.rate}/{limitconfig.rateperiod},{limitconfig.quota}/{limitconfig.quotaperiod}"
+    f"{limitconfig.rate}/{limitconfig.rateperiod},{limitconfig.quota}/{limitconfig.quotaperiod}",exempt_when=throttle_excess
 )  # FIXME: needs to handle Nones
-async def limited_endpoint(request: Request, response: Response):
+async def limited_endpoint(request: Request, response: Response) -> Response:
     """Endpoint to test BADGER's ability to handle different API limits.
-
-    Supports following limits:
-        - # of requests per defined period
-        - max # of concurrent requests
-        - minimum required delay in seconds between subsequent requests
-        - add a randomized delay up to a maximum of seconds before providing a response
 
     Args:
         request (Request): _description_
-        limitconfig (_type_, optional): _description_. Defaults to LimitConfig().
+        response (Response): _description_
 
     Returns:
         dict: Standard diagnostic response
-    """
-    """Endpoint to test BADGER's ability to handle different API limits.
+    """    
     
+    """
     Supports following limits:
         - # of requests per defined period
         - max # of concurrent requests
         - minimum required delay in seconds between subsequent requests
         - add a randomized delay up to a maximum of seconds before providing a response
-    
-    Args:
-        rate (int, optional): _description_. Defaults to 10.
-        period (str, optional): _description_. Defaults to "seconds".
-        maxconcur (int, optional): _description_. Defaults to 10.
-        delaysub (float, optional): _description_. Defaults to 0.0.
-        maxrandomdelay (float, optional): _description_. Defaults to 0.0.
-
-    Returns:
-        dict: Standard diagnostic response
     """
 
     async with semaphore:
@@ -218,23 +245,6 @@ async def limited_endpoint(request: Request, response: Response):
     return response
 
 
-
-@testsite.middleware("http")
-async def middleware(request: Request, call_next):
-    request.state.receivedAt = datetime.now()
-    # TODO: add removing 429 on exceeding rate/quota if throttle is true
-    
-    response = await call_next(request)    
-    
-    # show remaining calls
-        # response.headers['x-ratelimit-remaining'] fails to provide data for multiple limits
-    for i in limiter._storage.events:            
-        logging.info(f"{i} remaining in period: {int(i.split('/')[-3])-len(limiter._storage.events[i])})")
-    
-    
-        
-    return response
-    
 
 if __name__ == "__main__":
     uvicorn.run("app:testsite", port=9000, reload=True)
