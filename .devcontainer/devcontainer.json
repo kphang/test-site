@@ -17,7 +17,8 @@
 		"vscode": {
 			"extensions": [
 				"ms-python.python",
-				"GitHub.vscode-pull-request-github"
+				"GitHub.vscode-pull-request-github",
+				"njpwerner.autodocstring"
 			]
 		}
 	},
