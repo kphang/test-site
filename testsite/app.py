@@ -1,8 +1,7 @@
 import uvicorn
 
 from fastapi import FastAPI, Request, Response
-from pydantic import BaseSettings, root_validator
-from pydantic.dataclasses import dataclass
+from pydantic import BaseSettings, validator, root_validator, dataclasses
 from typing import Literal
 
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -22,10 +21,13 @@ logging.basicConfig(
     level=logging.INFO, format="[%(levelname)s]: %(asctime)s - %(message)s"
 )
 
-###
+### Classes
 
-@dataclass
+@dataclasses.dataclass
 class RateQuota():
+    """Used for rates and quotas to require the combination of an amount and period. 
+    Provides the method to create the limiter string.
+    """
     amount: int
     period: Literal["second","minute","hour","day","month","year"]
     
@@ -33,29 +35,39 @@ class RateQuota():
         return f"{self.amount}/{self.period}"
 
 class LimitSettings(BaseSettings):
+    """Stores limitation settings based on loaded file and performs validation for at least one rate/quota.
+    """
     rate: RateQuota | None = None
     quota: RateQuota | None = None
-    maxconcur: int | None = None
+    maxconcur: int = 10
     throttle: bool = False
     maxranddelay: int = 0
     
     class Config:
         env_file = "testsite/limitsettings.txt"
     
-    @root_validator
-    def checkratequotas(cls,values):
+    @validator("maxconcur")
+    def checkmaxconcur(cls,v):
+        if v < 1:
+            raise ValueError("If specified, maxconcur must be greater than 0")
         
+        return v
+    
+    @root_validator
+    def checkratequotas(cls,values):        
         if not any([values["rate"], values["quota"]]):
             raise ValueError("Either a rate or quota must be provided")    
         else:
             return values    
     
-    def fulllimitstr(self):
-                        
+    def fulllimitstr(self) -> str:
+        """Returns:
+            str: Concatenated limiter string for decorator
+        """                
         return ",".join([rq.limitstr() for rq in filter(None,[self.rate, self.quota])])
     
     
-###
+### Initialize limits
 
 limitsettings = LimitSettings()
 limiter = Limiter(
@@ -64,12 +76,11 @@ limiter = Limiter(
 
 testsite.state.limiter = limiter
 testsite.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-idlist = ["127.0.0.1", "/limited"]
+idlist = ["127.0.0.1", "/limited"] # standard since testsite is for internal testing and only the /limited endpoint is limited
 semaphore = Semaphore(limitsettings.maxconcur)
 
 
-### FUNCTIONS
-
+### Functions
 
 async def default_response(request: Request) -> dict:
     """Creates a standard diagnostic response that includes information about the endpoint hit and the data sent.
@@ -103,19 +114,26 @@ async def default_response(request: Request) -> dict:
 
 
 async def throttle_excess() -> bool:
+    """Called by limiters to check for the need to throttle requests if throttling is enabled.
+    This is called separately by each limiter. This handles two issues: 
+    (1) prevent the last limiter's call from overriding other throttles,
+    (2) continue to log hits to limiters that don't need to be throttled by manually triggering a hit.    
+
+    Returns:
+        bool: Whether the user's requests to the endpoint should be throttled
+    """                    
     
-    cur_limit = sys._getframe(1).f_locals["self"].limit                
     l_results = {}
-    
-    for l in limiter._route_limits["app.limited_endpoint"]:        
+    for l in limiter._route_limits["app.limited_endpoint"]: # test each endpoint whether it has capacity and make a note       
         if limitsettings.throttle and not limiter.limiter.test(l.limit,*idlist):
             l_results[l.limit]= True
         else:
             l_results[l.limit]= False    
 
-    if any(l_results.values()):        
+    if any(l_results.values()): # if any limiter needs to be throttled, manually increment those that do not       
+        cur_limit = sys._getframe(1).f_locals["self"].limit
         for k,v in l_results.items():
-            if k==cur_limit and not v:
+            if k==cur_limit and not v: # only increment a limit on its throttle check (not multiple times)
                 limiter.limiter.hit(k,*idlist)
         return True        
     else:
@@ -126,16 +144,23 @@ async def throttle_excess() -> bool:
 
 @testsite.middleware("http")
 async def middleware(request: Request, call_next):
+    """Middleware:
+    (1) tracks request receive time to provide in response as well as applicaiton of throttling
+    (2) provides logging on availability within rate limits and throttle status
+    (3) applies throttling consequence of doubling processing time (only noticeable when processing time is meaningful
+    such as when adding a random delay.
+    """
     
     request.state.receivedAt = datetime.now()
         
-    if limitsettings.throttle:
-        request.state.throttled = False
-        
-    for l in limiter._route_limits["app.limited_endpoint"]:
-        logging.info(f"{(l.limit, *idlist)} available: {limiter.limiter.get_window_stats(l.limit, *idlist)[1]}")
-        if limitsettings.throttle and not limiter.limiter.test(l.limit,*idlist):
-            request.state.throttled = True                
+    if request.url.path=="/limited": # this portion of the middleware only applies the limited endpoint
+        if limitsettings.throttle:
+            request.state.throttled = False
+            
+        for l in limiter._route_limits["app.limited_endpoint"]:
+            logging.info(f"{(l.limit, *idlist)} available: {limiter.limiter.get_window_stats(l.limit, *idlist)[1]}")
+            if limitsettings.throttle and not limiter.limiter.test(l.limit,*idlist):
+                request.state.throttled = True                
                                 
     response = await call_next(request)    
         
@@ -160,11 +185,7 @@ async def index(request: Request):
 
 @testsite.get("/limited")
 @testsite.post("/limited")
-@limiter.limit(
-    f"{limitsettings.fulllimitstr()}",exempt_when=throttle_excess    
-    # f"{limitsettings.rate.amount}/{limitsettings.rate.period},{limitsettings.quota.amount}/{limitsettings.quota.period}",exempt_when=throttle_excess    
-)  # TODO: needs to handle Nones
-# TODO: get model to create the limit string
+@limiter.limit(f"{limitsettings.fulllimitstr()}",exempt_when=throttle_excess)
 async def limited_endpoint(request: Request, response: Response) -> Response:
     """Endpoint to test BADGER's ability to handle different API limits.
 
@@ -175,18 +196,11 @@ async def limited_endpoint(request: Request, response: Response) -> Response:
     Returns:
         dict: Standard diagnostic response
     """    
-    
-    """
-    Supports following limits:
-        - # of requests per defined period
-        - max # of concurrent requests
-        - minimum required delay in seconds between subsequent requests
-        - add a randomized delay up to a maximum of seconds before providing a response
-    """
 
     async with semaphore:
         logging.info(f"{semaphore._value} semaphore available")
 
+        # apply random delay if enabled before responding
         if limitsettings.maxranddelay > 0:
             random.seed()
             request.state.randdelay = random.uniform(0, limitsettings.maxranddelay)
