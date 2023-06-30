@@ -13,6 +13,8 @@ Use ```http://127.0.0.1:9000/limited``` for simulating requests sent to a rate-l
 
 Sending a request to either will yield a standardized response containing some data from the original request along with some diagnostic information.
 
+Viewing the terminal where the app is run will show log info relating to limiters.
+
 As common with FastAPI sites, OpenAPI documentation is auto-generated and can be reached at ```http://127.0.0.1:9000/docs``` 
 
 

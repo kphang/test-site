@@ -158,7 +158,7 @@ async def middleware(request: Request, call_next) -> Response:
             request.state.throttled = False
             
         for l in limiter._route_limits["app.limited_endpoint"]:
-            logging.info(f"{(l.limit, *idlist)} available: {limiter.limiter.get_window_stats(l.limit, *idlist)[1]}")
+            logging.info(f"{(l.limit, *idlist)} available before request: {limiter.limiter.get_window_stats(l.limit, *idlist)[1]}")
             if limitsettings.throttle and not limiter.limiter.test(l.limit,*idlist):
                 request.state.throttled = True                
                                 
