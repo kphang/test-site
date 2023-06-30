@@ -1,0 +1,16 @@
+# Settings to use for the limited endpoint 
+
+# Amount int > 0 and period one of [second,minute,hour,day,month,year]
+RATE = { "amount":10, "period":"second" }
+
+# Amount int > 0 and period one of [second,minute,hour,day,month,year]
+QUOTA = { "amount":10000, "period":"day" }
+
+# Set max concurrent requests (int > 0)
+MAXCONCUR=10
+
+# Enable throttle (double response time) after rate/quota exceeded (bool)
+THROTTLE=False
+
+# Add a randomized delay of up to this many seconds (None or int > 0) - comment out for None
+MAXRANDDELAY = 1
