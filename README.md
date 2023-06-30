@@ -1,61 +1,37 @@
-# BADGER
+# Test Site
 
-  
+Test Site is a set of two ```FastAPI``` endpoints designed for testing applications making web requests, particularly for testing in conditions of rate-limiting. 
 
-> "badg-er - (verb) to annoy someone by repeatedly asking questions or telling the person to do something"
 
->
+## How to Use
 
-> [**Cambridge Academic Content Dictionary**](https://dictionary.cambridge.org/dictionary/english/ "Cambridge Academic Content Dictionary") © Cambridge University Press
+Clone the repository, create an environment running Python>=11.0, and run ```app.py```.
 
-  
+Use ```http://127.0.0.1:9000``` to test requests to an endpoint in an unrestricted manner.
 
-> "badger badger badger badger badger badger badger badger badger badger badger badger"
+Use ```http://127.0.0.1:9000/limited``` for simulating requests sent to a rate-limited API utilizing ```slowapi```.
 
->
+Sending a request to either will yield a standardized response containing some data from the original request along with some diagnostic information.
 
-> https://www.youtube.com/watch?v=EIyixC9NsLI
+Viewing the terminal where the app is run will show log info relating to limiters.
 
-  
-  
+As common with FastAPI sites, OpenAPI documentation is auto-generated and can be reached at ```http://127.0.0.1:9000/docs``` 
 
-# What does BADGER do?
 
-  
+## Utilizing the Limited Endpoint
 
-BADGER (**Batch Api-request Data, Get Eventual Results)** is a lightweight dockerized app with a web interface to allow uploading and scheduling API data requests, and downloading related results generated over multiple periods within a single file. BADGER runs persistently in the background, making it ideal for a self-hosted service.
+The limited endpoint provides the following functionality:
+- limiting the # of allowed requests over a period using a moving window strategy (e.g. 10/second with a max of 10000/month)    
+- limiting the maximum # of concurrent requests
+- enabling throttling of requests when exceeding rates in the form of doubling wait times
+- adding random delays to simulate processing time (enabling a small amount is highly recommended in order to meaningfully test asynchronous requests)
 
-  
+These settings can be adjusted by modifying the values in ```limitedsettings.txt``` which follows the syntax of an env file. Validation of inputs is provided using ```pydantic```.
 
-If you need to request data spanning multiple periods, it can be a hassle to batch requests and remember to send them in regular intervals before finally collecting results from individual tasks into a single consolidated file. With its focus on data requests, BADGER's web app interface can make it easier to accomplish than writing cron jobs or using more generalized scheduler services.
 
-  
+## Planned Features
 
-More concretely, in the most basic use case BADGER can be used to automate taking regular data snapshots and have them added to an ongoing file. However, it is primarily designed to handle cases where you may want to send large sets of requests to API's that have limits on the number that can be sent in a period (e.g. a subscription that allows 1,000 / month).
-
-  
-
-Features:
-
-- Uses the `httpx` with `anyio` libraries to facilitate asynchronous requests with rate limiting and retries with exponential backoff
-
-- Summary reports of successes and failures
-
-- Create a calendar event based on expected scheduled completion
-
-- To help with development, includes a test site with configuarable limits to send requests
-
-# Installation
-With [Docker](https://www.docker.com) installed, run the following command:
-
-    docker run -d kphang/BADGER
-
-# Planned features
-
-- Allow setting up a service to hit an endpoint on another service (such as IFTTT, Zapier) to generate notifications of events (e.g. job completion, task failure, service shutdown)
-
-- Auto-resumption in the event of container shutdown based on a contingency configuration
-
-- Keep track of configurations and limits from previously used API's
-
-- Handling non-data objects
+- Fix the quota to be a true quota based on a fixed window from the start of each defined period
+- Different types of responses (such as HTML pages, CSV, other files) in the form of default content or that can be provided by the user by pointing at a file on their system.
+- Different response behaviours based on query, path, and body
+- While ```GET``` and ```POST``` are both currently allowed, there is no difference in behaviours. A future version will have different types of behaviours enabled by each.
