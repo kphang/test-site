@@ -143,7 +143,7 @@ async def throttle_excess() -> bool:
 ### ENDPOINTS
 
 @testsite.middleware("http")
-async def middleware(request: Request, call_next):
+async def middleware(request: Request, call_next) -> Response:
     """Middleware:
     (1) tracks request receive time to provide in response as well as applicaiton of throttling
     (2) provides logging on availability within rate limits and throttle status
@@ -188,10 +188,6 @@ async def index(request: Request):
 @limiter.limit(f"{limitsettings.fulllimitstr()}",exempt_when=throttle_excess)
 async def limited_endpoint(request: Request, response: Response) -> Response:
     """Endpoint to test BADGER's ability to handle different API limits.
-
-    Args:
-        request (Request): _description_
-        response (Response): _description_
 
     Returns:
         dict: Standard diagnostic response
