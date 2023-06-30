@@ -1,18 +1,20 @@
 import uvicorn
 
 from fastapi import FastAPI, Request, Response
-from pydantic import BaseSettings
+from pydantic import BaseSettings, root_validator
+from pydantic.dataclasses import dataclass
+from typing import Literal
 
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
+from anyio import Semaphore, sleep
 
 import logging
 import sys
 from datetime import datetime
-from enum import StrEnum, auto
 import random
-from anyio import Semaphore, sleep
+
 
 
 testsite = FastAPI(title="Test Site")
@@ -20,33 +22,39 @@ logging.basicConfig(
     level=logging.INFO, format="[%(levelname)s]: %(asctime)s - %(message)s"
 )
 
+###
 
-class Period(StrEnum):
-    second = auto()
-    minute = auto()
-    hour = auto()
-    day = auto()
-    month = auto()
-    year = auto()
-
+@dataclass
+class RateQuota():
+    amount: int
+    period: Literal["second","minute","hour","day","month","year"]
+    
+    def limitstr(self) -> str:
+        return f"{self.amount}/{self.period}"
 
 class LimitSettings(BaseSettings):
-    rate: int = 10
-    rateperiod: Period = "second"
-    quota: int = 10000
-    quotaperiod: Period = "day"
-    maxconcur: int = 10
+    rate: RateQuota | None = None
+    quota: RateQuota | None = None
+    maxconcur: int | None = None
     throttle: bool = False
-    maxranddelay: int | None = None
+    maxranddelay: int = 0
     
     class Config:
         env_file = "testsite/limitsettings.txt"
-
-
-# TODO: validation of limit combinations (rate and period need to be both present, maxconcur > 0
-# TODO: validation of maxranddelay > 0
-# TODO: validation of throttle requires at least one of the rate/quota and periods
-
+    
+    @root_validator
+    def checkratequotas(cls,values):
+        
+        if not any([values["rate"], values["quota"]]):
+            raise ValueError("Either a rate or quota must be provided")    
+        else:
+            return values    
+    
+    def fulllimitstr(self):
+                        
+        return ",".join([rq.limitstr() for rq in filter(None,[self.rate, self.quota])])
+    
+    
 ###
 
 limitsettings = LimitSettings()
@@ -153,8 +161,10 @@ async def index(request: Request):
 @testsite.get("/limited")
 @testsite.post("/limited")
 @limiter.limit(
-    f"{limitsettings.rate}/{limitsettings.rateperiod},{limitsettings.quota}/{limitsettings.quotaperiod}",exempt_when=throttle_excess
+    f"{limitsettings.fulllimitstr()}",exempt_when=throttle_excess    
+    # f"{limitsettings.rate.amount}/{limitsettings.rate.period},{limitsettings.quota.amount}/{limitsettings.quota.period}",exempt_when=throttle_excess    
 )  # TODO: needs to handle Nones
+# TODO: get model to create the limit string
 async def limited_endpoint(request: Request, response: Response) -> Response:
     """Endpoint to test BADGER's ability to handle different API limits.
 
@@ -177,7 +187,7 @@ async def limited_endpoint(request: Request, response: Response) -> Response:
     async with semaphore:
         logging.info(f"{semaphore._value} semaphore available")
 
-        if limitsettings.maxranddelay is not None and limitsettings.maxranddelay > 0:
+        if limitsettings.maxranddelay > 0:
             random.seed()
             request.state.randdelay = random.uniform(0, limitsettings.maxranddelay)
             logging.info(f"{request.state.randdelay}s of random delay")
