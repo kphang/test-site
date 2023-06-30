@@ -1,10 +1,10 @@
 # Settings to use for the limited endpoint 
 
 # Amount int > 0 and period one of [second,minute,hour,day,month,year]
-#RATE = { "amount":10, "period":"second" }
+RATE = { "amount":10, "period":"second" }
 
 # Amount int > 0 and period one of [second,minute,hour,day,month,year]
-#QUOTA = { "amount":10000, "period":"day" }
+QUOTA = { "amount":10000, "period":"day" }
 
 # Set max concurrent requests (int > 0)
 MAXCONCUR=10
